@@ -1,8 +1,13 @@
-// Token Radar model "radar-3": one sealed DefiLlama snapshot in, one ranked board out.
+// Token Radar model "radar-4": one sealed DefiLlama snapshot in, one ranked board out.
 //
 // The board's job is to find protocols that record no token yet, say what a launch would be
 // worth, and tell a reader how to farm each one. Every number on the board is derived from
-// the snapshot's own figures at run time; no protocol name is ever special-cased.
+// the snapshot's own figures at run time; no protocol name is ever special-cased. radar-4
+// keeps radar-3's pricing and adds two things radar-3 did not have: a validation of the
+// pricing pipeline against the traded market's own recorded caps (a two-fold hold-out test,
+// a seven-day look-back and cross-view checks, all computed from the same snapshot and
+// printed in the dashboard's Method view), and farm plans whose position size is set by
+// each protocol's own depth — a stated share of its TVL, capped — with the sizing shown.
 //
 // The value model, in one paragraph. Protocols whose token already trades are the peer set:
 // for each category, the model takes the traded protocols' market-cap-to-TVL ratios, clamps
@@ -51,7 +56,7 @@ export interface Snapshot {
 }
 
 /** The model's version label: the dashboard names it and board.json carries it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** The model's constants. Every one is stated in the dashboard's Method view. */
 export const MODEL = {
@@ -77,6 +82,14 @@ export const MODEL = {
   /** Reach: this much per chain past the first, for at most reach_chains extra chains. */
   reach_per_chain: 0.02,
   reach_chains: 10,
+  /** A farm plan's position is this share of the protocol's own TVL (0.0005 = 0.05%). */
+  deposit_share: 0.0005,
+  /** No farm position is smaller than this, however thin the protocol. */
+  deposit_floor_usd: 500,
+  /** No farm position is larger than this, however deep the protocol. */
+  deposit_cap_usd: 10_000,
+  /** Positions are rounded to this many dollars, so a plan reads as a round sum. */
+  deposit_round_usd: 50,
 } as const;
 
 /** The board's value tiers: implied-value bands, widest first. The dashboard filters by them. */
@@ -106,6 +119,17 @@ export interface FarmStep {
   text: string;
   cost: string;
   time: string;
+}
+
+/**
+ * A farm plan's position size, set by the protocol's own depth: the deposit, the share of
+ * the protocol's TVL it makes up, and what that share is priced at by the row's own
+ * implied value — the model's arithmetic, shown on the detail page and in the plan itself.
+ */
+export interface PlanSize {
+  deposit_usd: number;
+  share_pct: number;
+  exposure_usd: number;
 }
 
 /** One protocol in a row's category standing: the biggest pre-token peers in its category. */
@@ -161,6 +185,7 @@ export interface BoardRow {
   cat_size: number;
   cat_top: CatPeer[];
   dossier: Dossier;
+  plan: PlanSize;
   farm_steps: string[];
 }
 
@@ -189,6 +214,7 @@ export interface RadarRow {
   cat_size: number;
   cat_top: CatPeer[];
   dossier: Dossier;
+  plan: PlanSize;
   farm_steps: string[];
 }
 
@@ -202,6 +228,46 @@ export interface LiveRow {
   mcap_usd: number | null;
   change_7d: number | null;
   mcap_tvl: number | null;
+}
+
+/** One fold of the hold-out test: the half of the traded market the model was graded on. */
+export interface HoldoutFold {
+  fold: number;
+  fitted_on: number;
+  tested_on: number;
+  /** The median prediction error as a factor: 10 to the median absolute log10 error. */
+  median_factor: number;
+  within_2x_pct: number;
+  spearman: number;
+}
+
+/**
+ * The model's validation, computed from the snapshot itself at run time. The snapshot is
+ * one day's record — it holds no earlier edition of itself — so no test here trains on the
+ * past and grades on the future. What the record does support, and what this is: a two-fold
+ * hold-out test (the pricing pipeline is fitted on one half of the traded market and graded,
+ * unseen, on the other half's recorded market caps, then the halves swap), a seven-day
+ * look-back (each board row's TVL is rolled back along its own recorded seven-day change
+ * and the board is re-ranked), and cross-view checks (the board's ranking against a raw-TVL
+ * ranking and against the same model with the growth factor removed).
+ */
+export interface Validation {
+  peers_tested: number;
+  folds: HoldoutFold[];
+  /** Pooled hold-out results across both folds. */
+  median_factor: number;
+  within_2x_pct: number;
+  within_3x_pct: number;
+  spearman: number;
+  /** The same hold-out graded for a naive anchor: TVL times the fit half's global median. */
+  baseline_median_factor: number;
+  baseline_within_2x_pct: number;
+  baseline_spearman: number;
+  /** Jackknife: the median movement of a category multiple when its largest peer is removed. */
+  multiples_jackknife_median_pct: number;
+  multiples_jackknife_categories: number;
+  lookback: { covered: number; board_size: number; spearman: number; top10_overlap: number };
+  views: { tvl_spearman: number; tvl_top10: number; nogrowth_spearman: number; nogrowth_top10: number };
 }
 
 /** Everything the dashboard renders: the board, the traded peer set, and the model behind both. */
@@ -221,6 +287,7 @@ export interface RadarData {
   live_size: number;
   rows: RadarRow[];
   live: LiveRow[];
+  validation: Validation;
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -369,18 +436,202 @@ export interface Working {
   age: number | null;
 }
 
+/** The maturity multiplier for an age in days: the model's floor plus its range over its horizon. */
+function maturityFor(age: number | null): number {
+  return age === null
+    ? MODEL.maturity_unknown
+    : MODEL.maturity_floor + (Math.min(age, MODEL.maturity_days) / MODEL.maturity_days) * MODEL.maturity_range;
+}
+
 /** Score one protocol: TVL x peer multiple, adjusted by growth, maturity and reach. */
 export function impliedValue(p: SnapshotProtocol, asOf: string, derived: { global: number; byCategory: Map<string, CategoryMultiple> }): Working {
   const peer = multipleFor(p, derived);
   const age = ageDays(asOf, p.listed_at);
   const growthPct = Math.min(MODEL.growth_cap_pct, Math.max(MODEL.growth_floor_pct, finite(p.change_7d, 0)));
   const growthMult = 1 + (growthPct / 100) * MODEL.growth_weight;
-  const maturityMult = age === null
-    ? MODEL.maturity_unknown
-    : MODEL.maturity_floor + (Math.min(age, MODEL.maturity_days) / MODEL.maturity_days) * MODEL.maturity_range;
+  const maturityMult = maturityFor(age);
   const reachMult = 1 + MODEL.reach_per_chain * Math.min(Math.max(p.chains.length - 1, 0), MODEL.reach_chains);
   const implied = Math.max(1, Math.round(p.tvl_usd * peer.multiple * growthMult * maturityMult * reachMult));
   return { implied, multiple: peer.multiple, peers: peer.peers, growthPct, growthMult, maturityMult, reachMult, age };
+}
+
+/** FNV-1a over the slug: which hold-out fold a traded peer belongs to. Pure in the slug. */
+function slugFold(slug: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < slug.length; i++) {
+    h ^= slug.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0) % 2;
+}
+
+/** Ranks of a series, averaged over ties, in the series' own order. */
+function ranksOf(values: number[]): number[] {
+  const order = values.map((v, i) => ({ v, i })).sort((a, b) => a.v - b.v || a.i - b.i);
+  const ranks = new Array<number>(values.length);
+  let at = 0;
+  while (at < order.length) {
+    let end = at;
+    while (end + 1 < order.length && order[end + 1]!.v === order[at]!.v) end++;
+    const rank = (at + end) / 2 + 1;
+    for (let k = at; k <= end; k++) ranks[order[k]!.i] = rank;
+    at = end + 1;
+  }
+  return ranks;
+}
+
+/** Spearman's rank correlation between two equal-length series; 0 when either is constant. */
+export function spearman(xs: number[], ys: number[]): number {
+  if (xs.length !== ys.length || xs.length < 2) return 0;
+  const rx = ranksOf(xs);
+  const ry = ranksOf(ys);
+  const n = xs.length;
+  const mx = rx.reduce((t, v) => t + v, 0) / n;
+  const my = ry.reduce((t, v) => t + v, 0) / n;
+  let cov = 0;
+  let vx = 0;
+  let vy = 0;
+  for (let i = 0; i < n; i++) {
+    cov += (rx[i]! - mx) * (ry[i]! - my);
+    vx += (rx[i]! - mx) ** 2;
+    vy += (ry[i]! - my) ** 2;
+  }
+  return vx === 0 || vy === 0 ? 0 : cov / Math.sqrt(vx * vy);
+}
+
+/** How many of the first ten slugs of one ranking appear in the first ten of the other. */
+function top10Overlap(a: string[], b: string[]): number {
+  const topB = new Set(b.slice(0, 10));
+  return a.slice(0, 10).filter((s) => topB.has(s)).length;
+}
+
+/** The traded protocols a test can grade against: a recorded market cap and a TVL. */
+function tradedPeers(snapshot: Snapshot): SnapshotProtocol[] {
+  return snapshot.protocols.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+}
+
+/** The pooled error figures of a set of (predicted, actual) pairs. */
+function errorStats(pairs: { pred: number; actual: number }[]): { median_factor: number; within_2x_pct: number; within_3x_pct: number; spearman: number } {
+  const logErr = pairs.map(({ pred, actual }) => Math.abs(Math.log10(pred / actual))).sort((a, b) => a - b);
+  const mid = Math.floor(logErr.length / 2);
+  const medLog = logErr.length % 2 === 1 ? logErr[mid]! : (logErr[mid - 1]! + logErr[mid]!) / 2;
+  const within = (f: number) => Math.round((1000 * pairs.filter(({ pred, actual }) => pred / actual >= 1 / f && pred / actual <= f).length) / pairs.length) / 10;
+  return {
+    median_factor: round4(Math.pow(10, medLog)),
+    within_2x_pct: within(2),
+    within_3x_pct: within(3),
+    spearman: round4(spearman(pairs.map((x) => x.pred), pairs.map((x) => x.actual))),
+  };
+}
+
+/**
+ * The model's validation, from the snapshot alone. The hold-out test fits the whole pricing
+ * pipeline (category multiples, shrinkage, band, and each protocol's own growth, maturity
+ * and reach factors) on one half of the traded market and predicts the other half's recorded
+ * market caps with it, then swaps the halves; the naive baseline beside it predicts with the
+ * fit half's global median alone, so the category structure has to earn its place. A
+ * jackknife refits every category without its largest peer, to show no single protocol's
+ * rating is carrying a multiple. The
+ * look-back rolls every covered board row's TVL back along its own recorded seven-day
+ * change — peer pricing held at the fetch's, the growth factor neutral, maturity aged a
+ * week — and re-ranks the board, measuring how much of today's order last week's figures
+ * already implied. The cross-view figures set the board's ranking against a raw-TVL ranking
+ * and against the same model with the growth factor removed.
+ */
+export function validateModel(snapshot: Snapshot, board: BoardRow[]): Validation {
+  const peers = tradedPeers(snapshot);
+  const folds: HoldoutFold[] = [];
+  const pooled: { pred: number; actual: number }[] = [];
+  const pooledBase: { pred: number; actual: number }[] = [];
+  for (const fold of [0, 1]) {
+    const fit = peers.filter((p) => slugFold(p.slug) !== fold);
+    const held = peers.filter((p) => slugFold(p.slug) === fold);
+    const fitDerived = deriveMultiples({ ...snapshot, protocols: fit });
+    const pairs = held.map((p) => ({ pred: impliedValue(p, snapshot.as_of, fitDerived).implied, actual: p.mcap_usd! }));
+    const stats = errorStats(pairs);
+    folds.push({ fold, fitted_on: fit.length, tested_on: held.length, median_factor: stats.median_factor, within_2x_pct: stats.within_2x_pct, spearman: stats.spearman });
+    pooled.push(...pairs);
+    pooledBase.push(...held.map((p) => ({ pred: Math.max(1, Math.round(p.tvl_usd * fitDerived.global)), actual: p.mcap_usd! })));
+  }
+  const all = errorStats(pooled);
+  const base = errorStats(pooledBase);
+
+  // Jackknife the multiples: refit without each category's largest peer and measure how
+  // far that category's multiple moves. A multiple one protocol can swing is not evidence.
+  const full = deriveMultiples(snapshot);
+  const peersByCategory = new Map<string, SnapshotProtocol[]>();
+  for (const p of peers) {
+    const key = categoryKey(p);
+    const list = peersByCategory.get(key);
+    if (list === undefined) peersByCategory.set(key, [p]);
+    else list.push(p);
+  }
+  const jackknifeDeltas: number[] = [];
+  for (const [category, list] of peersByCategory) {
+    if (list.length < 3) continue;
+    const largest = [...list].sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : 1))[0]!;
+    const refit = deriveMultiples({ ...snapshot, protocols: snapshot.protocols.filter((q) => q.slug !== largest.slug) });
+    const before = full.byCategory.get(category);
+    const after = refit.byCategory.get(category);
+    if (before !== undefined && after !== undefined && before.multiple > 0) {
+      jackknifeDeltas.push((100 * Math.abs(after.multiple - before.multiple)) / before.multiple);
+    }
+  }
+  const jackknifeMedian = jackknifeDeltas.length > 0 ? Math.round(10 * median(jackknifeDeltas)) / 10 : 0;
+
+  const covered = board.filter((r) => r.change_7d !== null && r.change_7d > -100);
+  const lookbackImplied = covered.map((r) => {
+    const tvlThen = r.tvl_usd / (1 + r.change_7d! / 100);
+    const ageThen = r.age_days === null ? null : Math.max(0, r.age_days - 7);
+    return tvlThen * r.model.peer_multiple * maturityFor(ageThen) * r.model.reach_multiplier;
+  });
+  const byLookback = covered.map((r, i) => ({ slug: r.slug, v: lookbackImplied[i]! })).sort((a, b) => b.v - a.v || (a.slug < b.slug ? -1 : 1));
+
+  const byTvl = [...board].sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : 1));
+  const byNoGrowth = [...board].sort((a, b) => b.implied_value_usd / b.model.growth_multiplier - a.implied_value_usd / a.model.growth_multiplier || (a.slug < b.slug ? -1 : 1));
+  const boardSlugs = board.map((r) => r.slug);
+
+  return {
+    peers_tested: peers.length,
+    folds,
+    median_factor: all.median_factor,
+    within_2x_pct: all.within_2x_pct,
+    within_3x_pct: all.within_3x_pct,
+    spearman: all.spearman,
+    baseline_median_factor: base.median_factor,
+    baseline_within_2x_pct: base.within_2x_pct,
+    baseline_spearman: base.spearman,
+    multiples_jackknife_median_pct: jackknifeMedian,
+    multiples_jackknife_categories: jackknifeDeltas.length,
+    lookback: {
+      covered: covered.length,
+      board_size: board.length,
+      spearman: round4(spearman(covered.map((r) => r.implied_value_usd), lookbackImplied)),
+      top10_overlap: top10Overlap(byLookback.map((x) => x.slug), boardSlugs),
+    },
+    views: {
+      tvl_spearman: round4(spearman(board.map((r) => r.implied_value_usd), board.map((r) => r.tvl_usd))),
+      tvl_top10: top10Overlap(byTvl.map((r) => r.slug), boardSlugs),
+      nogrowth_spearman: round4(spearman(board.map((r) => r.implied_value_usd), board.map((r) => r.implied_value_usd / r.model.growth_multiplier))),
+      nogrowth_top10: top10Overlap(byNoGrowth.map((r) => r.slug), boardSlugs),
+    },
+  };
+}
+
+/**
+ * A farm plan's position size, set by the protocol's own depth: the model's stated share
+ * of its TVL, kept between the floor and the cap and rounded to a clean sum. The share is
+ * the honest figure — the same dollars are a large slice of a thin protocol and a sliver
+ * of a deep one — and the exposure is that share priced by the row's own implied value.
+ */
+export function planSize(p: SnapshotProtocol, implied: number): PlanSize {
+  const clamped = Math.min(MODEL.deposit_cap_usd, Math.max(MODEL.deposit_floor_usd, p.tvl_usd * MODEL.deposit_share));
+  const deposit = Math.round(clamped / MODEL.deposit_round_usd) * MODEL.deposit_round_usd;
+  return {
+    deposit_usd: deposit,
+    share_pct: round4((100 * deposit) / p.tvl_usd),
+    exposure_usd: Math.round(deposit * (implied / p.tvl_usd)),
+  };
 }
 
 /** The short signal tags a row earns from its own figures; the dashboard renders them as chips. */
@@ -557,15 +808,6 @@ function gasFor(chain: string): string {
   return '$0.10-1.00 of gas on this chain';
 }
 
-/** How much capital one farm position needs, scaled to the protocol's own TVL. */
-function capitalFor(p: SnapshotProtocol): number {
-  if (p.tvl_usd >= 5_000_000_000) return 250;
-  if (p.tvl_usd >= 1_000_000_000) return 150;
-  if (p.tvl_usd >= 100_000_000) return 100;
-  if (p.tvl_usd >= 10_000_000) return 75;
-  return 50;
-}
-
 /** How long to hold, from the protocol's age: younger protocols get a longer qualifying window. */
 function holdDaysFor(age: number | null): number {
   if (age === null) return 45;
@@ -659,11 +901,16 @@ export function stepText(step: FarmStep): string {
 /**
  * A protocol's farm plan: six steps, each an action with a cost and a time, derived from the
  * protocol's own record (category, chains, TVL, age) and never from a hand-written list.
+ * The position every step works with is sized by the protocol's own depth — the model's
+ * stated share of its TVL, floored and capped — and the hold step shows that sizing: the
+ * deposit, its share of TVL, and the implied value that share carries on the model's own
+ * figures, so no plan recommends a position the protocol's numbers make absurd.
  */
-export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
+export function farmSteps(p: SnapshotProtocol, w: Working): FarmStep[] {
   const chain = chainOf(p);
-  const capital = capitalFor(p);
-  const hold = holdDaysFor(age);
+  const size = planSize(p, w.implied);
+  const capital = size.deposit_usd;
+  const hold = holdDaysFor(w.age);
   const gas = gasFor(chain);
   const acts = actionsFor(p, capital, chain);
   const multi = p.chains.length > 1 ? ` It runs on ${p.chains.length} chains; ${chain} is the cheapest place to start.` : '';
@@ -675,7 +922,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
     },
     {
       text: acts.main,
-      cost: `$${capital} of capital and about ${gas}`,
+      cost: `$${capital} of capital (${size.share_pct}% of its TVL) and about ${gas}`,
       time: '15 minutes to set up',
     },
     {
@@ -684,7 +931,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: '10 minutes a week',
     },
     {
-      text: `Hold the position for at least ${hold} days so the activity appears in more than one weekly snapshot of the protocol.`,
+      text: `Hold the position for at least ${hold} days so the activity appears in more than one weekly snapshot of the protocol. Its size comes from ${p.name}'s own depth: $${capital} is ${size.share_pct}% of its ${usd(p.tvl_usd)} TVL, under the plan rule of ${MODEL.deposit_share * 100}% of TVL, at least $${MODEL.deposit_floor_usd} and at most $${MODEL.deposit_cap_usd}; at this row's implied multiple of ${mult(w.implied / p.tvl_usd)}, that share carries about ${usd(size.exposure_usd)} of implied launch value on the model's own figures — a measure of scale, not a promise.`,
       cost: `the $${capital} stays in the position`,
       time: `${hold} days`,
     },
@@ -798,7 +1045,8 @@ export function buildBoard(snapshot: Snapshot): BoardRow[] {
       cat_size: standing.size,
       cat_top: standing.top,
       dossier,
-      farm_steps: farmSteps(s.p, s.w.age).map(stepText),
+      plan: planSize(s.p, s.w.implied),
+      farm_steps: farmSteps(s.p, s.w).map(stepText),
     };
   });
 }
@@ -850,6 +1098,7 @@ export function radarRow(row: BoardRow): RadarRow {
     cat_size: row.cat_size,
     cat_top: row.cat_top,
     dossier: row.dossier,
+    plan: row.plan,
     farm_steps: row.farm_steps,
   };
 }
@@ -859,6 +1108,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const derived = deriveMultiples(snapshot);
   const board = buildBoard(snapshot);
   const live = liveRows(snapshot);
+  const validation = validateModel(snapshot, board);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -875,6 +1125,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     live_size: live.length,
     rows: board.map(radarRow),
     live,
+    validation,
   };
   return { board, radar };
 }
