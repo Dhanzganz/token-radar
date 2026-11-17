@@ -81,3 +81,71 @@ TVL. The global median — the anchor for shrinkage and for the band — stays a
 of every traded ratio. The weighted median orders pairs by ratio, then by slug, so the
 result never depends on the order the snapshot listed the peers in, and two runs of the
 program on the same snapshot stay byte-identical.
+
+## The validation (radar-4)
+
+radar-4 keeps radar-3's pricing untouched — every row's implied value is identical to
+v2's — and adds the thing radar-3 never had: the model is tested, on every build,
+against the only ground truth the snapshot carries, and the tests are printed in the
+dashboard's Method view and carried in `board.json` under `validation`.
+
+**What the record can and cannot support.** The snapshot's ten protocol fields are
+`slug, name, category, chains, tvl_usd, change_7d, mcap_usd, listed_at, gecko_id,
+symbol`. There is exactly one change window (seven days), one age field, and market
+caps for the traded protocols. There is no TVL history series and no earlier edition
+of the snapshot, so a genuine walk-forward — fit on the past, grade on the future —
+is impossible from this record, and nothing here is labelled one. What the record
+does support is a hold-out test, a jackknife, a seven-day look-back, and cross-view
+consistency checks. Those are what radar-4 runs.
+
+**Hold-out test.** The 128 traded protocols with a recorded cap and a TVL are split
+into two folds by an FNV-1a hash of the slug (59 / 69). The whole pricing pipeline —
+category multiples, shrinkage, band, and each protocol's own growth, maturity and
+reach factors — is fitted on one fold and predicts the other fold's recorded market
+caps; then the folds swap and the results pool:
+
+| | Median miss (factor) | Within 2× | Within 3× | Rank correlation |
+| --- | --- | --- | --- | --- |
+| Full pipeline | 4.99 | 18.0% | 30.5% | 0.37 |
+| Naive anchor (TVL × global median) | 4.94 | 19.5% | — | 0.42 |
+
+Fold by fold, the pipeline's median miss is 5.59 (fold 0, fitted on 69, tested on 59)
+and 4.00 (fold 1, fitted on 59, tested on 69). The honest reading: on individual
+traded protocols the category structure does **not** beat the global anchor. A
+recorded cap carries an idiosyncratic market rating — the record's own ratios run
+from ×0.0003 to ×400 around a median of ×0.22 — that no TVL-based model can foresee,
+and the hold-out measures exactly that dispersion. The board therefore claims the
+*typical* peer price for a category, not a forecast of any protocol's rating, and
+each row's confidence grade carries how much evidence stands behind its price. The
+test's job is to keep that claim calibrated and printed, not to decorate it.
+
+**Jackknife.** Every category with at least three traded peers is refitted without
+its largest peer: across the 14 qualifying categories the multiple moves by a median
+of 35.2%. Thin categories genuinely lean on their largest peer — which is why the
+model shrinks them toward the global median and why the dossier marks their rows'
+confidence down. The number is printed rather than smoothed over.
+
+**Seven-day look-back.** For each board row carrying a seven-day change (211 of
+213), last week's TVL is reconstructed as `tvl / (1 + change_7d / 100)`, the row is
+re-priced with peer multiples held at the fetch's, the growth factor neutral (the
+prior week's change is not in the record) and maturity aged seven days, and the
+board is re-ranked. The look-back order correlates **0.96** (Spearman) with today's,
+and **9 of the top 10** were already there. The ranking is not one day's artefact.
+
+**Cross-view checks.** Against a raw-TVL ranking the board correlates 0.89 with 7
+of the top 10 shared — the model is not a size sort. Against the same model with
+the growth factor removed it correlates 0.998 with the top 10 unchanged — the one
+noisy field in the record tilts the board; it does not drive it.
+
+## Deposit-sized farm plans (radar-4)
+
+radar-3 sized every farm position from flat TVL tiers ($50–$250). radar-4 sizes each
+plan by its protocol's own depth: the deposit is **0.05% of the protocol's TVL**,
+kept between **$500** and **$10,000** and rounded to the nearest $50. Every detail
+page shows the sizing — deposit, share of TVL, and the exposure (the deposit priced
+at the row's own implied multiple) — and the plan's hold step repeats the math. On
+this board the deposits run $2,500–$10,000 (the $500 floor never binds: the
+snapshot's own inclusion floor is $5M of TVL) and the shares run 0.0004%–0.0504%
+of TVL. The share is the honest figure: the same $10,000 is a sliver of Steakhouse
+Financial's $2.75B and a twentieth of a percent of a $20M protocol, and no plan
+recommends a position its protocol's depth makes absurd.

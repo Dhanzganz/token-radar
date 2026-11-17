@@ -9,7 +9,7 @@ it reads a sealed snapshot of every protocol DefiLlama tracks, works out which o
 record no token and are not a wrapped or staked product of one that trades, and ranks them
 by what their launch would be worth — with a farm plan for each.
 
-## The model (radar-3)
+## The model (radar-4)
 
 Nothing is hardcoded per protocol. The program derives its prices from the snapshot itself:
 
@@ -33,8 +33,20 @@ Nothing is hardcoded per protocol. The program derives its prices from the snaps
    risks its own record shows, and a confidence grade for the evidence behind its price.
    Every line traces to the snapshot's fields; where the record is silent, the dossier
    says so instead of filling the gap.
+5. **The validation.** The pricing is tested against the traded market's own recorded
+   caps on every build: a two-fold hold-out (fit on one half of the traded protocols,
+   predict the other half's caps, swap), a jackknife of every category multiple, a
+   seven-day look-back that re-ranks the board from last week's TVLs, and cross-view
+   checks against a raw-TVL ranking and a growth-free model. The snapshot holds one
+   day's record and no earlier edition of itself, so no past-to-future test is claimed;
+   the Method view prints the tests that the record does support, with their numbers.
+6. **Deposit-sized farm plans.** Each plan's position is 0.05% of its protocol's own
+   TVL (at least $500, at most $10,000), and the detail page shows the sizing — the
+   deposit, its share of TVL, and the implied value that share carries — so no plan
+   recommends a position the protocol's depth makes absurd.
 
-The dashboard's **Method** view prints the full derived multiple table and every constant.
+The dashboard's **Method** view prints the full derived multiple table, every constant,
+and the validation results.
 
 ## Layout
 
@@ -45,7 +57,8 @@ The dashboard's **Method** view prints the full derived multiple table and every
 - `vendor/makefun-board.ts` — the kit's dossier library, vendored unchanged.
 - `dashboard/` — the static page (board, per-protocol detail, filters, traded peers,
   method). Renders with no network from the `data.js` the program writes beside it.
-- `screenshots/` — the board, a protocol's detail view, and a filtered view.
+- `screenshots/` — the board, a protocol's detail view, a filtered view, and a detail
+  view scrolled to its deposit-sized farm plan.
 
 ## Run it
 
