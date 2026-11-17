@@ -105,6 +105,18 @@ td.val { color: var(--acc); font-weight: 600; }
 }
 .grade.A { background: var(--acc); color: #06130d; }
 .grade.B { background: var(--acc-dim); color: #dff7ec; }
+.tier {
+  display: inline-block; font-family: var(--mono); font-size: 10.5px; font-weight: 700; letter-spacing: .04em;
+  border-radius: 4px; padding: 1px 6px; background: var(--panel-3); color: var(--dim);
+  border: 1px solid var(--line); white-space: nowrap;
+}
+.tier.t1 { background: var(--acc); color: #06130d; border-color: var(--acc); }
+.tier.t2 { background: var(--acc-dim); color: #dff7ec; border-color: var(--acc-dim); }
+.tier.t3 { color: var(--amber); border-color: #4d3a17; }
+.vbar { display: block; height: 4px; background: var(--panel-3); border-radius: 2px; margin-top: 3px; min-width: 64px; }
+.vbar i { display: block; height: 100%; background: var(--acc-dim); border-radius: 2px; }
+.vbar.wide { min-width: 130px; margin-top: 0; }
+.vbar.wide i { background: var(--acc); }
 .more { text-align: center; padding: 14px; }
 .more button, .btn {
   background: var(--panel-3); color: var(--ink); border: 1px solid var(--line); border-radius: 5px;
@@ -141,6 +153,19 @@ ol.plan li { margin: 0 0 12px; }
 ol.plan .step { font-size: 13.5px; }
 ol.plan .tags { margin-top: 3px; }
 ol.plan .tags .chip { color: var(--acc); border-color: var(--acc-dim); }
+ul.bullets { margin: 0; padding-left: 18px; }
+ul.bullets li { font-size: 13.5px; margin: 0 0 8px; color: #c7d3de; }
+ul.bullets.risks li { color: var(--mut); }
+.conf { margin-top: 10px; border-top: 1px dashed var(--line-soft); padding-top: 10px; }
+.conf-badge {
+  display: inline-block; font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: .06em;
+  border-radius: 4px; padding: 3px 9px; border: 1px solid var(--line); color: var(--mut); background: var(--panel-3);
+}
+.conf-badge.High { background: var(--acc); color: #06130d; border-color: var(--acc); }
+.conf-badge.Medium { color: var(--amber); border-color: #4d3a17; }
+.conf-badge.Low { color: var(--bad); border-color: #5a2b2b; }
+table.catstand td.barcell { width: 38%; }
+table.catstand tr.me td { background: var(--panel-2); color: var(--acc); font-weight: 700; }
 .note { color: var(--mut); font-size: 12.5px; }
 .note b { color: var(--amber); font-weight: 600; }
 
