@@ -9,20 +9,30 @@ it reads a sealed snapshot of every protocol DefiLlama tracks, works out which o
 record no token and are not a wrapped or staked product of one that trades, and ranks them
 by what their launch would be worth — with a farm plan for each.
 
-## The model (radar-2)
+## The model (radar-3)
 
 Nothing is hardcoded per protocol. The program derives its prices from the snapshot itself:
 
 1. **Peer multiples.** For every traded protocol, take `mcap / TVL`, clamp to 0.01–5, and
-   group by category. A category's multiple is its median ratio, shrunk toward the global
-   median as if the global had 8 extra peers, and kept within a third to three times that
-   median, so one or two wild peers cannot price a whole category.
+   group by category. A category's multiple is its **depth-weighted median** ratio — each
+   peer weighted by the square root of its TVL, so the protocols the market has actually
+   capitalised set the price without any one of them dictating it — shrunk toward the
+   global median as if the global had 8 extra peers, and kept within a third to three times
+   that median. The global median stays a plain median of every ratio: weighting it too
+   would let a handful of giants flatten every category's evidence (measured, not guessed —
+   `MODEL_NOTES.md` holds the variant comparison behind this choice).
 2. **Implied value.** `TVL × category multiple × growth × maturity × reach` — growth damps
    the 7-day TVL change, maturity rewards years run with no token, reach counts chains.
 3. **The board.** Every watchlist protocol, plus every other pre-token protocol below the
    watchlist floor that passes the house's name screens (no version markers, no whole word
    *wrapped* / *staked* / *staking*, no exchange name at the head). Traded protocols are
-   never ranked; they are the evidence.
+   never ranked; they are the evidence. Rows are banded into value tiers (Tier 1
+   Headliners ≥ $150M down to Tier 4 Long shots < $15M).
+4. **The dossier.** Every row carries an evidence thesis (its standing in its category,
+   its momentum against that category's median, its track record, its peers' pricing), the
+   risks its own record shows, and a confidence grade for the evidence behind its price.
+   Every line traces to the snapshot's fields; where the record is silent, the dossier
+   says so instead of filling the gap.
 
 The dashboard's **Method** view prints the full derived multiple table and every constant.
 
