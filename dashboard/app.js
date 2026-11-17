@@ -305,6 +305,10 @@ function renderDetail(slug) {
     '</tbody></table>' +
     '<p class="note">#' + r.cat_rank + ' of ' + r.cat_size + ' pre-token protocols in its category on this board, by TVL in the snapshot.</p>' +
     '<h3 style="margin-top:16px">Farm plan</h3>' +
+    '<div class="kv"><span class="k">Position, sized to its TVL</span><span class="v">' + fmtFull(r.plan.deposit_usd) + ' — ' + r.plan.share_pct + '% of ' + fmtFull(r.tvl_usd) + '</span></div>' +
+    '<div class="kv"><span class="k">Implied value of that share</span><span class="v">≈ ' + fmtFull(r.plan.exposure_usd) + ' at this row\u2019s implied multiple</span></div>' +
+    '<p class="note">The plan below works a position sized by the rule the Method view states: ' + (R.constants.deposit_share * 100) + '% of the protocol\u2019s own TVL, at least ' + fmtFull(R.constants.deposit_floor_usd) + ' and at most ' + fmtFull(R.constants.deposit_cap_usd) + '. ' +
+    'The exposure is the model\u2019s own arithmetic — the share of TVL the deposit makes up, priced at the row\u2019s implied value — a measure of scale, not a promised distribution.</p>' +
     '<ol class="plan">' + r.farm_steps.map((s) => {
       const p = splitStep(s);
       return '<li><div class="step">' + esc(p.text) + '</div><div class="tags">' +
@@ -335,6 +339,7 @@ function renderLive() {
 /** The method: the formula, the constants, and the derived multiple table, all stated plainly. */
 function renderMethod() {
   const c = R.constants;
+  const V = R.validation;
   const kv = (k, v) => '<div class="kv"><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + '</span></div>';
   $view.innerHTML =
     '<div class="prose"><h2 style="margin:14px 0 6px">How this radar values a launch that has not happened</h2>' +
@@ -353,6 +358,16 @@ function renderMethod() {
     'Traded protocols are never ranked; they are the evidence, shown under Traded peers.</p>' +
     '<p><b>Step 4 — write the dossier, band the board.</b> Each row\u2019s detail page carries a dossier the model writes from the same record: a thesis of what the protocol\u2019s own fields support (its standing in its category, its momentum against that category\u2019s median, its track record, its reach, its peers\u2019 pricing), the risks the same fields show (a falling or unreported seven-day change, a short or dateless record, a thin or rich peer set, a single chain), and a confidence grade for the evidence — high when at least eight traded peers price the category and both the seven-day change and the listing date are reported, lower as the record thins. Confidence grades the evidence behind a price, never the protocol. ' +
     'The board is also banded into tiers by implied value: ' + R.tiers.map((t) => tierLabel(t)).join(' · ') + '.</p>' +
+    '<p><b>Step 5 — test the model on the market it did not fit.</b> The snapshot is one day\u2019s record: it holds no earlier edition of itself, so no test here trains on the past and grades on the future — this board does not claim one. What the record supports is run instead, on every build. ' +
+    'The <b>hold-out test</b> splits the ' + V.peers_tested + ' traded protocols in two by slug, fits the whole pipeline on one half and predicts the other half\u2019s recorded market caps, then swaps the halves. ' +
+    'The median prediction misses by a factor of ' + V.median_factor.toFixed(2) + '; ' + V.within_2x_pct + '% land within twice the recorded cap and ' + V.within_3x_pct + '% within three times (rank correlation ' + V.spearman.toFixed(2) + '). ' +
+    'A naive anchor — TVL times the global median alone — scores much the same (factor ' + V.baseline_median_factor.toFixed(2) + ', ' + V.baseline_within_2x_pct + '% within twice, ' + V.baseline_spearman.toFixed(2) + '). ' +
+    'Read plainly: an individual protocol\u2019s recorded cap carries a rating no peer model can foresee — the record\u2019s own market-cap-to-TVL ratios run from \u00d70.0003 to \u00d7400 around a median of \u00d70.22 — so this board prices the <i>typical</i> outcome for a category and grades the evidence behind each row\u2019s price, instead of pretending to foresee the rating.</p>' +
+    '<p><b>Stability, look-back, and what drives the order.</b> Refitting every category without its largest peer moves its multiple by a median of ' + V.multiples_jackknife_median_pct + '% across the ' + V.multiples_jackknife_categories + ' categories with at least three peers — the reason thin categories are shrunk toward the global median and marked down in each row\u2019s confidence. ' +
+    'Rolling each row\u2019s TVL back along its own recorded seven-day change and re-ranking (' + V.lookback.covered + ' of ' + V.lookback.board_size + ' rows carry the change) gives an order correlating ' + V.lookback.spearman.toFixed(2) + ' with today\u2019s, with ' + V.lookback.top10_overlap + ' of the top ten already there a week earlier: the ranking is not one day\u2019s artefact. ' +
+    'Nor is it a size sort — against a raw-TVL ranking it correlates ' + V.views.tvl_spearman.toFixed(2) + ' with ' + V.views.tvl_top10 + ' of the top ten shared — and removing the growth factor entirely still leaves a correlation of ' + V.views.nogrowth_spearman.toFixed(2) + ': the one noisy field tilts the board, it does not drive it.</p>' +
+    '<p><b>Step 6 — size every farm plan to its protocol.</b> A plan\u2019s position is ' + (c.deposit_share * 100) + '% of the protocol\u2019s own TVL — at least ' + fmtFull(c.deposit_floor_usd) + ', at most ' + fmtFull(c.deposit_cap_usd) + ', rounded to a clean sum — never a flat figure pasted onto every row. ' +
+    'Each detail page shows its row\u2019s sizing: the deposit, its share of TVL, and the implied launch value that share carries at the row\u2019s own multiple. The same dollars are a large slice of a thin protocol and a sliver of a deep one; the share is the honest number, and no plan recommends a position the protocol\u2019s depth makes absurd.</p>' +
     '<p><b>What this is not.</b> An implied value is the board\u2019s claim about what a launch would be worth if the record stayed as it is. It does not predict that a token will be issued, or when. ' +
     'A protocol here <i>records</i> no token in DefiLlama\u2019s fields, which is not proof it has none.</p></div>' +
     '<div class="cols"><section class="card"><h3>Model constants — ' + esc(R.model_version) + '</h3>' +
@@ -365,6 +380,10 @@ function renderMethod() {
     kv('Maturity', c.maturity_floor + ' → ' + (c.maturity_floor + c.maturity_range) + ' over ' + c.maturity_days + ' days') +
     kv('Maturity, date unknown', '×' + c.maturity_unknown) +
     kv('Reach', '+' + (c.reach_per_chain * 100) + '% per chain, max ' + c.reach_chains) +
+    kv('Farm position', (c.deposit_share * 100) + '% of TVL, ' + fmtFull(c.deposit_floor_usd) + ' – ' + fmtFull(c.deposit_cap_usd)) +
+    kv('Hold-out test', V.peers_tested + ' traded peers, two folds') +
+    kv('Hold-out median miss', 'factor of ' + V.median_factor.toFixed(2) + ' (naive anchor ' + V.baseline_median_factor.toFixed(2) + ')') +
+    kv('Look-back correlation', V.lookback.spearman.toFixed(2) + ', top-10 overlap ' + V.lookback.top10_overlap + '/10') +
     '</section>' +
     '<section class="card"><h3>Derived peer multiples</h3>' +
     '<table class="mini"><thead><tr><th>Category</th><th>Peers</th><th>Weighted median</th><th>Multiple used</th></tr></thead><tbody>' +
