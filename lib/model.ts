@@ -1,4 +1,4 @@
-// Token Radar model "radar-2": one sealed DefiLlama snapshot in, one ranked board out.
+// Token Radar model "radar-3": one sealed DefiLlama snapshot in, one ranked board out.
 //
 // The board's job is to find protocols that record no token yet, say what a launch would be
 // worth, and tell a reader how to farm each one. Every number on the board is derived from
@@ -7,11 +7,19 @@
 // The value model, in one paragraph. Protocols whose token already trades are the peer set:
 // for each category, the model takes the traded protocols' market-cap-to-TVL ratios, clamps
 // them to a sane band, and uses a median shrunk toward the global median by the peer count,
-// so a category with two wild peers cannot dominate. A pre-token protocol's implied value is
-// its TVL times its category's peer multiple, adjusted by three documented factors: a damped
-// seven-day growth factor, a maturity factor that grows with how long the protocol has run
-// with no token, and a small reach factor for the chains it already spans. The dashboard's
-// Method view prints the derived multiple table, so a reader can audit every figure.
+// so a category with two wild peers cannot dominate. radar-3 weights that category median
+// by peer depth: each peer's ratio counts in proportion to the square root of its TVL, so
+// the protocols the market has actually capitalised set the price, while no single giant
+// can dictate it; the global median stays a plain median of every ratio, so the anchor and
+// the band around it do not move. (Three variants were scored against this snapshot before
+// this one was kept; MODEL_NOTES.md in this repository holds the comparison.) A pre-token
+// protocol's implied value is its TVL times its category's peer multiple, adjusted by three
+// documented factors: a damped seven-day growth factor, a maturity factor that grows with
+// how long the protocol has run with no token, and a small reach factor for the chains it
+// already spans. The dashboard's Method view prints the derived multiple table, so a reader
+// can audit every figure. Each row also carries a dossier — an evidence thesis, the risks
+// its own record shows, and a confidence grade for the evidence behind its price — every
+// line of it traced to the snapshot's fields, and a value tier for the board's bands.
 //
 // Board membership mirrors the house's own reading of the snapshot: every watchlist slug is
 // ranked, plus every other pre-token protocol below the watchlist floor that is not a wrapped,
@@ -43,13 +51,15 @@ export interface Snapshot {
 }
 
 /** The model's version label: the dashboard names it and board.json carries it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** The model's constants. Every one is stated in the dashboard's Method view. */
 export const MODEL = {
   /** Traded peers' mcap/TVL ratios are clamped to this band before any median is taken. */
   ratio_floor: 0.01,
   ratio_cap: 5,
+  /** A peer's ratio counts in its category's median in proportion to TVL raised to this power. */
+  weight_exponent: 0.5,
   /** A category median is shrunk toward the global median as if the global had this many peers. */
   shrink_peers: 8,
   /** A category's multiple is also kept inside this band around the global median. */
@@ -69,6 +79,20 @@ export const MODEL = {
   reach_chains: 10,
 } as const;
 
+/** The board's value tiers: implied-value bands, widest first. The dashboard filters by them. */
+export const TIERS = [
+  { tier: 1, label: 'Headliners', min_usd: 150_000_000 },
+  { tier: 2, label: 'Contenders', min_usd: 50_000_000 },
+  { tier: 3, label: 'Prospects', min_usd: 15_000_000 },
+  { tier: 4, label: 'Long shots', min_usd: 0 },
+] as const;
+
+/** The tier a row's implied value falls in. */
+export function tierFor(impliedUsd: number): number {
+  for (const t of TIERS) if (impliedUsd >= t.min_usd) return t.tier;
+  return TIERS[TIERS.length - 1]!.tier;
+}
+
 /** One category's derived peer multiple: the evidence behind every row in that category. */
 export interface CategoryMultiple {
   category: string;
@@ -82,6 +106,26 @@ export interface FarmStep {
   text: string;
   cost: string;
   time: string;
+}
+
+/** One protocol in a row's category standing: the biggest pre-token peers in its category. */
+export interface CatPeer {
+  slug: string;
+  name: string;
+  tvl_usd: number;
+}
+
+/**
+ * A row's dossier: the evidence for its price, the risks its own record shows, and a
+ * confidence grade for that evidence. Every line is built from the snapshot's fields —
+ * TVL, seven-day change, listing date, chains and the derived peer table — and nothing
+ * else: where the record is silent, the dossier says so instead of filling the gap.
+ */
+export interface Dossier {
+  thesis: string[];
+  risks: string[];
+  confidence: 'High' | 'Medium' | 'Low';
+  confidence_reason: string;
 }
 
 /** One row of board.json: the ranked board's row, with the model's working shown. */
@@ -102,6 +146,7 @@ export interface BoardRow {
   age_days: number | null;
   implied_value_usd: number;
   grade: string;
+  tier: number;
   signals: string[];
   model: {
     peer_multiple: number;
@@ -112,6 +157,10 @@ export interface BoardRow {
     reach_multiplier: number;
     age_days: number | null;
   };
+  cat_rank: number;
+  cat_size: number;
+  cat_top: CatPeer[];
+  dossier: Dossier;
   farm_steps: string[];
 }
 
@@ -129,12 +178,17 @@ export interface RadarRow {
   age_days: number | null;
   implied_value_usd: number;
   grade: string;
+  tier: number;
   signals: string[];
   peer_multiple: number;
   peers: number;
   growth_multiplier: number;
   maturity_multiplier: number;
   reach_multiplier: number;
+  cat_rank: number;
+  cat_size: number;
+  cat_top: CatPeer[];
+  dossier: Dossier;
   farm_steps: string[];
 }
 
@@ -157,6 +211,7 @@ export interface RadarData {
   floor_usd: number;
   model_version: string;
   constants: typeof MODEL;
+  tiers: typeof TIERS;
   global_multiple: number;
   multiples: CategoryMultiple[];
   scanned: number;
@@ -191,6 +246,22 @@ function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/**
+ * The depth-weighted median of { ratio, weight } pairs: the ratio at which the accumulated
+ * weight first reaches half the total. Pairs are ordered by ratio, then by slug, so the
+ * result never depends on the order the snapshot happened to list the peers in.
+ */
+function weightedMedian(pairs: { ratio: number; weight: number; slug: string }[]): number {
+  const sorted = [...pairs].sort((a, b) => a.ratio - b.ratio || (a.slug < b.slug ? -1 : 1));
+  const total = sorted.reduce((t, p) => t + p.weight, 0);
+  let acc = 0;
+  for (const p of sorted) {
+    acc += p.weight;
+    if (acc >= total / 2) return p.ratio;
+  }
+  return sorted[sorted.length - 1]!.ratio;
 }
 
 /** A whole day count from `listedAt` to `asOf`, clamped at zero; null when either date is absent or bad. */
@@ -242,32 +313,38 @@ function categoryKey(p: SnapshotProtocol): string {
 /**
  * The peer multiples, derived from the snapshot itself: every traded protocol with a market
  * cap and a TVL contributes its mcap/TVL ratio, clamped to the model's band. A category's
- * multiple is its median ratio shrunk toward the global median by the peer count, so thin
- * categories lean on the whole market and deep ones stand on their own record.
+ * multiple is its depth-weighted median ratio — each peer weighted by the square root of
+ * its TVL, so the protocols the market has capitalised most set the price without any one
+ * of them dictating it — shrunk toward the global median by the peer count, so thin
+ * categories lean on the whole market and deep ones stand on their own record. The global
+ * median itself stays a plain median of every ratio: it is the anchor the shrinkage leans
+ * on and the band is drawn around, and weighting it too would let a handful of the largest
+ * protocols in the snapshot flatten every category's evidence toward one figure.
  */
 export function deriveMultiples(snapshot: Snapshot): { global: number; table: CategoryMultiple[]; byCategory: Map<string, CategoryMultiple> } {
-  const ratiosByCategory = new Map<string, number[]>();
+  const ratiosByCategory = new Map<string, { ratio: number; weight: number; slug: string }[]>();
   const all: number[] = [];
   for (const p of snapshot.protocols) {
     if (isPreToken(p) || p.mcap_usd === null || p.mcap_usd <= 0 || p.tvl_usd <= 0) continue;
     const ratio = Math.min(MODEL.ratio_cap, Math.max(MODEL.ratio_floor, p.mcap_usd / p.tvl_usd));
     all.push(ratio);
     const key = categoryKey(p);
+    const pair = { ratio, weight: Math.pow(p.tvl_usd, MODEL.weight_exponent), slug: p.slug };
     const list = ratiosByCategory.get(key);
-    if (list === undefined) ratiosByCategory.set(key, [ratio]);
-    else list.push(ratio);
+    if (list === undefined) ratiosByCategory.set(key, [pair]);
+    else list.push(pair);
   }
   const globalRaw = all.length > 0 ? median(all) : 0.2;
   const global = round4(globalRaw);
   const table: CategoryMultiple[] = [];
   const byCategory = new Map<string, CategoryMultiple>();
-  for (const [category, ratios] of ratiosByCategory) {
-    const raw = median(ratios);
-    const shrunk = (ratios.length * raw + MODEL.shrink_peers * globalRaw) / (ratios.length + MODEL.shrink_peers);
+  for (const [category, pairs] of ratiosByCategory) {
+    const raw = weightedMedian(pairs);
+    const shrunk = (pairs.length * raw + MODEL.shrink_peers * globalRaw) / (pairs.length + MODEL.shrink_peers);
     // One or two wild peers must not price a whole category: keep the result within a band
     // around the global median, a third of it to three times it.
     const banded = Math.min(globalRaw * MODEL.multiple_band, Math.max(globalRaw / MODEL.multiple_band, shrunk));
-    const entry: CategoryMultiple = { category, peers: ratios.length, raw_median: round4(raw), multiple: round4(banded) };
+    const entry: CategoryMultiple = { category, peers: pairs.length, raw_median: round4(raw), multiple: round4(banded) };
     table.push(entry);
     byCategory.set(category, entry);
   }
@@ -344,6 +421,127 @@ export function gradeFor(p: SnapshotProtocol, w: Working, globalMultiple: number
   if (points >= 5) return 'B';
   if (points >= 3) return 'C';
   return 'D';
+}
+
+/** Compact dollars for dossier prose: $1.51B, $888M, $320K, $950. */
+function usd(n: number): string {
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `$${(n / 1e3).toFixed(0)}K`;
+  return `$${Math.round(n)}`;
+}
+
+/** A signed percentage with one decimal: +5.6%, -8.3%. */
+function pct(n: number): string {
+  return `${n > 0 ? '+' : ''}${n.toFixed(1)}%`;
+}
+
+/** A multiple the way the dashboard writes it: x0.21. */
+function mult(n: number): string {
+  return `x${n.toFixed(2)}`;
+}
+
+/** The context a dossier is written against: the row's standing among its category and board. */
+export interface DossierContext {
+  catRank: number;
+  catSize: number;
+  catMedianChange: number | null;
+  agePercentile: number | null;
+  globalMultiple: number;
+}
+
+/**
+ * One row's dossier: an evidence thesis, the risks its own record shows, and a confidence
+ * grade. Thesis lines state only what the record supports; anything adverse or absent goes
+ * to the risks, so the two never blur. Confidence grades the evidence behind the price —
+ * how many traded peers price the category, and whether the record carries the two fields
+ * the model leans on (the seven-day change and the listing date) — never the protocol.
+ */
+export function dossierFor(
+  p: SnapshotProtocol,
+  w: Working,
+  peer: CategoryMultiple,
+  implied: number,
+  ctx: DossierContext,
+): Dossier {
+  const cat = p.category ?? 'Uncategorised';
+  const thesis: string[] = [];
+  if (ctx.catSize <= 1) {
+    thesis.push(`The only pre-token ${cat} protocol on the board, holding ${usd(p.tvl_usd)} of TVL.`);
+  } else if (ctx.catRank === 1) {
+    thesis.push(`The largest pre-token ${cat} protocol the snapshot tracks: ${usd(p.tvl_usd)} of TVL, first of ${ctx.catSize} in its category.`);
+  } else {
+    thesis.push(`Ranks #${ctx.catRank} of ${ctx.catSize} pre-token ${cat} protocols by TVL, with ${usd(p.tvl_usd)} locked.`);
+  }
+  if (p.change_7d !== null && p.change_7d > 0) {
+    const vs = ctx.catMedianChange !== null
+      ? `, against a category median of ${pct(ctx.catMedianChange)} for the same week`
+      : '';
+    thesis.push(`TVL grew ${pct(p.change_7d)} in the seven days to the snapshot${vs}: the momentum the growth factor (x${w.growthMult.toFixed(2)}) prices is in the record, not projected.`);
+  }
+  if (w.age !== null && w.age >= 365) {
+    const pc = ctx.agePercentile !== null ? ` — longer than ${ctx.agePercentile}% of the board has run` : '';
+    thesis.push(`Tracked since ${p.listed_at}: ${w.age} days with no token recorded${pc}.`);
+  }
+  if (p.chains.length >= 4) {
+    thesis.push(`Live on ${p.chains.length} chains (${p.chains.slice(0, 3).join(', ')}${p.chains.length > 3 ? ', …' : ''}), which the model's reach factor credits at x${w.reachMult.toFixed(2)}.`);
+  }
+  if (peer.peers > 0) {
+    thesis.push(`Its category's ${peer.peers} traded peer${peer.peers === 1 ? ' prices' : 's price'} at a depth-weighted median of ${mult(peer.raw_median)} of TVL; shrunk toward the global ${mult(ctx.globalMultiple)}, this row is priced at ${mult(w.multiple)}.`);
+  }
+
+  const risks: string[] = [];
+  if (p.change_7d === null) {
+    risks.push('DefiLlama reports no seven-day TVL change for it, so momentum is priced as neutral — an absence in the record, not a measurement.');
+  } else if (p.change_7d <= -10) {
+    risks.push(`TVL fell ${Math.abs(p.change_7d).toFixed(1)}% in the seven days to the snapshot; the growth factor (x${w.growthMult.toFixed(2)}) assumes the slide stops at the fetch, and the record cannot say whether it did.`);
+  }
+  if (w.age === null) {
+    risks.push(`The record carries no listing date, so maturity is priced at the model's unknown-date setting (x${MODEL.maturity_unknown.toFixed(2)}) — an assumption, not a measurement.`);
+  } else if (w.age < 180) {
+    risks.push(`Only ${w.age} days of tracked history: a short record, and its maturity factor (x${w.maturityMult.toFixed(2)}) sits near the model's floor of x${MODEL.maturity_floor.toFixed(2)}.`);
+  }
+  if (peer.peers === 0) {
+    risks.push(`No traded protocol prices its category, so it is valued at the global median multiple (${mult(ctx.globalMultiple)}) — the thinnest evidence on the board.`);
+  } else if (peer.peers <= 3) {
+    risks.push(`Only ${peer.peers} traded peer${peer.peers === 1 ? '' : 's'} price${peer.peers === 1 ? 's' : ''} this category, so the multiple leans heavily on the global median; a single peer re-rating would move this row.`);
+  }
+  if (peer.peers > 0 && w.multiple >= 2 * ctx.globalMultiple) {
+    risks.push(`Its category multiple (${mult(w.multiple)}) is over twice the global median (${mult(ctx.globalMultiple)}): the price assumes it launches rich, like its category's most expensive peers.`);
+  }
+  if (peer.peers > 0 && peer.raw_median > 0) {
+    const stretch = implied / p.tvl_usd / peer.raw_median;
+    if (stretch >= 1.8) {
+      risks.push(`The adjustments stretch the price: the implied value is ${mult(implied / p.tvl_usd)} of TVL against a raw peer median of ${mult(peer.raw_median)} — growth, maturity and reach together more than double the peer evidence.`);
+    } else if (stretch <= 0.55) {
+      risks.push(`The model's adjustments discount it to ${mult(implied / p.tvl_usd)} of TVL, well under the raw peer median of ${mult(peer.raw_median)}: the price leans on those discounts being right.`);
+    }
+  }
+  if (p.chains.length === 1) {
+    risks.push(`Deployed on a single chain (${p.chains[0] ?? 'unnamed'}): the reach factor adds nothing, and a chain-specific shock would hit the whole TVL at once.`);
+  }
+  if (p.category === null) {
+    risks.push('DefiLlama names no category for it, so it is priced against the global peer set rather than like-for-like protocols.');
+  }
+  if (risks.length === 0) {
+    risks.push(`Its price rests on its category's peer pricing in a single day's record; peer prices after the fetch are outside what the snapshot can show.`);
+  }
+
+  let points = 0;
+  if (peer.peers >= 8) points += 2;
+  else if (peer.peers >= 4) points += 1;
+  else if (peer.peers === 0) points -= 1;
+  if (p.change_7d !== null) points += 1;
+  if (w.age !== null) points += 1;
+  if (p.category === null) points -= 1;
+  const confidence: Dossier['confidence'] = points >= 4 ? 'High' : points >= 2 ? 'Medium' : 'Low';
+  const peerPart = peer.peers === 0
+    ? 'no traded peer prices its category'
+    : `${peer.peers} traded peer${peer.peers === 1 ? '' : 's'} price${peer.peers === 1 ? 's' : ''} its category`;
+  const changePart = p.change_7d !== null ? 'its seven-day change is reported' : 'its seven-day change is unreported';
+  const datePart = w.age !== null ? 'its listing date is in the record' : 'its listing date is unreported';
+  const confidence_reason = `${confidence}: ${peerPart}, ${changePart}, and ${datePart}.`;
+  return { thesis: thesis.slice(0, 4), risks: risks.slice(0, 4), confidence, confidence_reason };
 }
 
 /** The first chain a protocol names, or a neutral phrase. */
@@ -525,35 +723,84 @@ export function buildBoard(snapshot: Snapshot): BoardRow[] {
     return { p, w, onWatchlist: watch.has(p.slug) };
   });
   scored.sort((a, b) => b.w.implied - a.w.implied || b.p.tvl_usd - a.p.tvl_usd || (a.p.slug < b.p.slug ? -1 : 1));
-  return scored.map((s, i) => ({
-    rank: i + 1,
-    slug: s.p.slug,
-    name: s.p.name,
-    category: s.p.category,
-    chains: s.p.chains,
-    tvl_usd: s.p.tvl_usd,
-    change_7d: s.p.change_7d,
-    mcap_usd: s.p.mcap_usd,
-    listed_at: s.p.listed_at,
-    gecko_id: s.p.gecko_id,
-    symbol: s.p.symbol,
-    token_status: 'pre-token',
-    watchlist: s.onWatchlist,
-    age_days: s.w.age,
-    implied_value_usd: s.w.implied,
-    grade: gradeFor(s.p, s.w, derived.global),
-    signals: signalsFor(s.p, s.w, s.onWatchlist),
-    model: {
-      peer_multiple: s.w.multiple,
-      peers: s.w.peers,
-      growth_pct: round4(s.w.growthPct),
-      growth_multiplier: round4(s.w.growthMult),
-      maturity_multiplier: round4(s.w.maturityMult),
-      reach_multiplier: round4(s.w.reachMult),
+
+  // The dossier context: each row's standing among its category's board members, by TVL,
+  // and each known age's percentile among the board's known ages. Both are pure functions
+  // of the scored set, so the board stays deterministic.
+  const byCategory = new Map<string, typeof scored>();
+  for (const s of scored) {
+    const key = categoryKey(s.p);
+    const list = byCategory.get(key);
+    if (list === undefined) byCategory.set(key, [s]);
+    else list.push(s);
+  }
+  const catStanding = new Map<string, { rank: number; size: number; medianChange: number | null; top: CatPeer[] }>();
+  for (const list of byCategory.values()) {
+    const byTvl = [...list].sort((a, b) => b.p.tvl_usd - a.p.tvl_usd || (a.p.slug < b.p.slug ? -1 : 1));
+    const changes = list.map((s) => s.p.change_7d).filter((c): c is number => c !== null);
+    const top = byTvl.slice(0, 5).map((s) => ({ slug: s.p.slug, name: s.p.name, tvl_usd: s.p.tvl_usd }));
+    byTvl.forEach((s, i) => {
+      catStanding.set(s.p.slug, {
+        rank: i + 1,
+        size: list.length,
+        medianChange: changes.length > 0 ? round4(median(changes)) : null,
+        top,
+      });
+    });
+  }
+  const knownAges = scored.map((s) => s.w.age).filter((a): a is number => a !== null).sort((a, b) => a - b);
+  const agePercentile = (age: number | null): number | null => {
+    if (age === null || knownAges.length === 0) return null;
+    let younger = 0;
+    for (const a of knownAges) if (a < age) younger++;
+    return Math.floor((100 * younger) / knownAges.length);
+  };
+
+  return scored.map((s, i) => {
+    const standing = catStanding.get(s.p.slug)!;
+    const peer = multipleFor(s.p, derived);
+    const dossier = dossierFor(s.p, s.w, peer, s.w.implied, {
+      catRank: standing.rank,
+      catSize: standing.size,
+      catMedianChange: standing.medianChange,
+      agePercentile: agePercentile(s.w.age),
+      globalMultiple: derived.global,
+    });
+    return {
+      rank: i + 1,
+      slug: s.p.slug,
+      name: s.p.name,
+      category: s.p.category,
+      chains: s.p.chains,
+      tvl_usd: s.p.tvl_usd,
+      change_7d: s.p.change_7d,
+      mcap_usd: s.p.mcap_usd,
+      listed_at: s.p.listed_at,
+      gecko_id: s.p.gecko_id,
+      symbol: s.p.symbol,
+      token_status: 'pre-token' as const,
+      watchlist: s.onWatchlist,
       age_days: s.w.age,
-    },
-    farm_steps: farmSteps(s.p, s.w.age).map(stepText),
-  }));
+      implied_value_usd: s.w.implied,
+      grade: gradeFor(s.p, s.w, derived.global),
+      tier: tierFor(s.w.implied),
+      signals: signalsFor(s.p, s.w, s.onWatchlist),
+      model: {
+        peer_multiple: s.w.multiple,
+        peers: s.w.peers,
+        growth_pct: round4(s.w.growthPct),
+        growth_multiplier: round4(s.w.growthMult),
+        maturity_multiplier: round4(s.w.maturityMult),
+        reach_multiplier: round4(s.w.reachMult),
+        age_days: s.w.age,
+      },
+      cat_rank: standing.rank,
+      cat_size: standing.size,
+      cat_top: standing.top,
+      dossier,
+      farm_steps: farmSteps(s.p, s.w.age).map(stepText),
+    };
+  });
 }
 
 /** How many traded protocols the dashboard's peer view carries, by market cap. */
@@ -592,12 +839,17 @@ export function radarRow(row: BoardRow): RadarRow {
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
     grade: row.grade,
+    tier: row.tier,
     signals: row.signals,
     peer_multiple: row.model.peer_multiple,
     peers: row.model.peers,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     reach_multiplier: row.model.reach_multiplier,
+    cat_rank: row.cat_rank,
+    cat_size: row.cat_size,
+    cat_top: row.cat_top,
+    dossier: row.dossier,
     farm_steps: row.farm_steps,
   };
 }
@@ -613,6 +865,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     floor_usd: snapshot.floor_usd,
     model_version: MODEL_VERSION,
     constants: MODEL,
+    tiers: TIERS,
     global_multiple: derived.global,
     multiples: derived.table,
     scanned: snapshot.protocols.length,
