@@ -1,151 +1,121 @@
-# Model notes — how radar-3's peer multiples were chosen
+# Model notes — radar-5
 
-radar-3 changes exactly one thing in radar-2's value model: how a category's peer multiple
-is taken from its traded peers. Four candidate scorings were run against the same sealed
-snapshot (DefiLlama, as of 2026-11-14; 758 protocols, 213 board rows) before one was kept.
-This file is the record of that comparison. All figures below are the runs' own output.
+The design record for the Token Radar pricing model, version radar-5: what the traded
+record actually shows, the model fitted to it, every variant that was measured on the
+way, and the ones that were rejected with their numbers. The test throughout is the
+house hold-out: the 128 traded protocols of the sealed snapshot (DefiLlama, 14 November
+2026) split in two by an FNV-1a hash of the slug; the pipeline is fitted on one half and
+predicts the other half's recorded market caps; the halves swap and the errors pool.
+The previous model's published figures on this test are the bar: median miss x4.99,
+18.0% of predictions within 2x, 30.5% within 3x, rank correlation 0.37. The naive anchor
+(TVL x the fit half's plain median ratio) scores x4.94 / 19.5% / 0.42. A scratch harness
+re-implementing the previous model exactly reproduced its published numbers before any
+variant was trusted (pooled x4.987 / 18.0% / 30.5% / 0.3695, folds x5.59 and x4.00).
 
-## The baseline was verified first
+## What the record shows
 
-A scratch re-implementation of radar-2 reproduced the submitted board **exactly — 213 of
-213 rows, identical rank order and identical implied values** — so every variant was
-measured against a baseline known to be the real one, not an approximation of it.
+Three findings drove the redesign.
 
-## The variants
+**Size is the dominant signal the old model ignored.** Across the 128 traded peers, the
+rank correlation between log-ratio and log-TVL is -0.379. Median ratios by TVL bucket
+fall monotonically: x0.87 under $25M, x0.21 at $25-100M, x0.13 at $100-500M, x0.03 above
+$500M. A least-squares fit of log-ratio on log-TVL has slope -0.478: market cap grows at
+roughly TVL^0.52. The old model priced a $2.75B protocol and a $3M protocol in the same
+category at the same multiple; the record says their multiples differ by more than a
+decade. This, not any multiplier, is where the old model's error lived.
 
-- **v1 — radar-2 (baseline).** Category multiple = plain median of the peers' clamped
-  mcap/TVL ratios, shrunk toward the plain global median (×0.2138); growth weight 0.35.
-- **M — momentum-weighted.** v1's multiples, but the growth factor's weight doubles
-  (0.35 → 0.70) and its clamp widens (−50…+100 → −60…+150).
-- **L — fully depth-weighted.** Category medians *and* the global median weighted by each
-  peer's full TVL; growth weight 0.25.
-- **L2a — depth-weighted categories, plain anchor.** Category medians weighted by full
-  TVL; the global median stays plain; growth weight 0.35.
-- **L2b — radar-3 (kept).** Category medians weighted by the **square root** of each peer's
-  TVL; the global median stays plain; growth weight 0.35. Everything else — clamps,
-  shrinkage, band, growth/maturity/reach factors, board membership — is radar-2 unchanged.
+**The old multipliers price nothing.** Rank correlations with the log-ratio: seven-day
+TVL change -0.015, listing age +0.010 (age buckets are not even monotone), chain count
+-0.070. Ablating the old model confirms it: removing all three factors improves its
+median miss (x4.87 against x4.99); keeping only growth gives x4.81. The factors were
+hand-set in the first version and never re-earned their place.
 
-## The numbers
+**Ratios scatter over decades, so fit in log space with medians.** Raw ratios run from
+0.0003 to 400 (median x0.214); within a category the interquartile range of the log-ratio
+is 0.5 to 1.7 decades. Arithmetic shrinkage of a median toward another median — the old
+model's (n·raw + 8·global)/(n + 8) — mixes scales that are not comparable; in log space
+the same shrinkage is a proper weighted average of positions on the scale the data
+lives on.
 
-| Variant | Spearman ρ vs v1 | Top-10 overlap | Top-25 overlap | Categories pinned at a band edge |
-| --- | --- | --- | --- | --- |
-| M (momentum) | 0.9973 | 10/10 | 25/25 | 3/34 (as v1) |
-| L (full TVL, weighted anchor) | 0.9124 | 9/10 | 23/25 | **13/34** |
-| L2a (full TVL, plain anchor) | 0.9211 | 9/10 | 23/25 | 4/34 |
-| L2b (√TVL, plain anchor) | 0.9631 | 10/10 | 24/25 | 3/34 (as v1) |
+## The model
 
-No variant priced any row outside the peer band (implied/TVL within [0.01, 5] for all 213
-rows in every run).
+For each traded peer, y = log10 of its cap-to-TVL ratio winsorised to [0.01, 5]. The fit
+alternates five passes:
 
-**Why M was rejected.** It is cosmetic: the growth factor is clamped, so doubling its
-weight moves almost nothing (ρ = 0.9973; the top 25's mean growth multiplier goes from
-×0.991 to ×0.983). What little it does change, it changes by leaning harder on the single
-noisiest field in the snapshot — one seven-day TVL change. More exposure to the weakest
-evidence is not a refinement.
+- given the slope, each category's **level** is the median of its peers' size-adjusted
+  y, shrunk toward the market level (the median of all adjusted y) by n/(n + 5);
+- given the levels, the **size slope** is the Theil–Sen median of the pairwise slopes of
+  the level-adjusted record against (log10 TVL - reference), clamped to [-0.9, +0.1].
+  The reference is the peers' median log-TVL.
 
-**Why L was rejected.** Weighting the *global* median by TVL breaks the anchor. The
-snapshot's largest traded protocols are staking and bridge giants that trade at very low
-mcap/TVL, so the TVL-weighted global median collapses from ×0.2138 to **×0.0336**. The band
-around it ([global/3, global×3]) then crushes **13 of 34 categories onto a band edge** —
-Dexs, Yield, Canonical Bridge and Basis Trading all land on exactly ×0.1007 — and category
-evidence is flattened into a near-uniform price. The top row's implied value falls from
-$1.51B to $292M not because any evidence about it changed, but because the anchor moved.
-A model whose categories stop differing has less to say, not more.
+A protocol is priced at TVL x 10^(level + slope x size gap), the multiple clamped to the
+traded band [0.01, 5]. Fitted on all 128 peers: slope **-0.4412**, reference TVL
+**$32,564,327**, market level **x0.2754** at that size. Category levels at the reference
+size run from x0.57 (Canonical Bridge) and x0.54 (Privacy) down to x0.14 (Liquid
+Staking) and x0.16 (Liquidity Manager) — after shrinkage, and after size is accounted
+for, which is why they differ from the raw category medians: CEX, for example, sits at
+x0.51 at typical size because its raw median was dragged down by its giants.
 
-**Why L2b over L2a.** Both keep the plain anchor and differ only in the weight. Full-TVL
-weights let a category's single largest peer pick the median outright; square-root weights
-let depth count without handing it the decision — a peer with 100× another's TVL counts
-10×, not 100×. L2b is also the most conservative change that is still real: the top of the
-board is untouched where the evidence is unchanged, and multiples move only where depth
-genuinely disagrees with a head-count median:
+Hold-out, pooled, the shipped pipeline measuring itself: **median miss x3.70, 31.3%
+within 2x, 45.3% within 3x, rank correlation 0.426** — better than the previous model on
+every measure, and better than the naive anchor on miss and within-2x (the anchor's rank
+correlation, 0.421, is matched, not beaten: ranking is mostly size, and the anchor has
+size). Fold detail: fitted on 69, tested on 59 — x3.78 / 27.1% / 0.413; fitted on 59,
+tested on 69 — x3.38 / 34.8% / 0.441. Per-fold slopes fit at -0.336 and -0.446, so the
+size term is not one fold's artefact. A five-fold split tells the same story (x3.52 /
+32.0% / 0.402). The board's own jackknife (in board.json): refitting without each
+category's largest peer moves the median category level by 8.3%.
 
-| Category | Peers | radar-2 multiple | radar-3 multiple |
-| --- | --- | --- | --- |
-| Basis Trading | 7 | ×0.42 | ×0.21 |
-| Canonical Bridge | 8 | ×0.48 | ×0.28 |
-| Yield | 9 | ×0.20 | ×0.27 |
-| RWA | 9 | ×0.25 | ×0.17 |
-| Liquid Staking | 9 | ×0.12 | ×0.11 |
-| Lending | 15 | ×0.16 | ×0.16 (unchanged) |
-| Dexs | 11 | ×0.29 | ×0.29 (unchanged) |
-| CEX | 9 | ×0.14 | ×0.14 (unchanged) |
+## Variants measured, and what became of them
 
-Top of the board under radar-3: Steakhouse Financial **$1,509,029,737** and Gauntlet
-**$888,384,891** — unchanged, because Risk Curators has a single traded peer and a median
-of one is the same weighted or not — then Veda **$285,472,307** (radar-2: $287,122,436).
+Two-fold pooled hold-out; median miss / within 2x / within 3x / rank correlation.
 
-## The kept rule, stated plainly
+| variant | median | 2x | 3x | rho | verdict |
+|---|---|---|---|---|---|
+| previous model (radar-4), full | 4.99 | 18.0% | 30.5% | 0.369 | the bar |
+| radar-4, factors ablated | 4.87 | 18.0% | 29.7% | 0.374 | factors earn nothing |
+| log levels only (no size slope) | 4.99 | 21.1% | 32.0% | 0.395 | log space alone helps ranking, not miss |
+| log levels + OLS slope | 3.67 | 31.3% | 44.5% | 0.420 | close; OLS chases outliers |
+| log levels + Theil–Sen slope, shrink 4 | 3.59 | 31.3% | 44.5% | 0.422 | kept family |
+| **shrink 5 (shipped)** | **3.70** | **31.3%** | **45.3%** | **0.426** | **shipped** |
+| shrink 6 | 3.74 | 31.3% | 43.8% | 0.428 | same family |
+| shrink 8 | 3.76 | 30.5% | 44.5% | 0.436 | same family |
+| log + TS slope, sqrt-TVL-weighted medians | 4.27 | 31.3% | 41.4% | 0.354 | rejected: weighting hurts in log space |
+| size slope only, no categories | 3.74 | 27.3% | 41.4% | 0.437 | rejected: categories carry the 2x share |
+| mean levels, empirical-Bayes shrink | 3.85 | 30.5% | 45.3% | 0.409 | rejected: means chase the scatter medians ignore |
+| hinge slope (flatter above $100M) | 3.49 | 32.8% | 44.5% | 0.422 | rejected: five-fold rho falls to 0.387; a two-fold artefact |
+| slope damped x0.85 | 3.86 | 28.9% | 43.8% | 0.419 | rejected: the record's slope is the record's |
+| shipped model + old growth/maturity/reach | 3.50 | 27.3% | 44.5% | 0.420 | rejected: buys median, pays in 2x |
+| shipped model + growth only | 3.55 | 31.3% | 46.1% | 0.426 | not kept: see below |
 
-A peer's ratio counts in its category's median in proportion to the square root of its
-TVL. The global median — the anchor for shrinkage and for the band — stays a plain median
-of every traded ratio. The weighted median orders pairs by ratio, then by slug, so the
-result never depends on the order the snapshot listed the peers in, and two runs of the
-program on the same snapshot stay byte-identical.
+Shrink 4/5/6/8 are one family within noise of each other; 5 is the middle of the family
+and the roundest statement of the rule (a category's own record counts once it has five
+peers against it). The hinge and the growth-only rows are recorded because they were
+measured, not kept: the hinge's gain does not survive the five-fold split, and the
+growth multiplier's gain sits entirely in the median while its field's own correlation
+with the target is -0.02 — on 128 points that is fold luck, and it would put one week's
+TVL move back into every price, which is the behaviour this redesign exists to remove.
 
-## The validation (radar-4)
+## What the board looks like now
 
-radar-4 keeps radar-3's pricing untouched — every row's implied value is identical to
-v2's — and adds the thing radar-3 never had: the model is tested, on every build,
-against the only ground truth the snapshot carries, and the tests are printed in the
-dashboard's Method view and carried in `board.json` under `validation`.
+The size term reprices the top of the board hard, and that is the honest consequence of
+the record, not a defect: traded protocols at $2.75B of TVL trade at x0.03-0.05, so
+Steakhouse Financial — $2.75B of TVL the old model priced at $1,509,029,737 — is priced
+at $147,730,003, and the board's top is Gauntlet ($108M) and Nonce Capital ($58M)
+behind it. The value tiers were re-barred to the model's own scale (Headliners from
+$35M: 10 rows) because the old bars ($150M) would have left the top tier empty. Every
+row's price stays inside the traded band by construction: implied/TVL is within
+[0.01, 5] for all 213 rows.
 
-**What the record can and cannot support.** The snapshot's ten protocol fields are
-`slug, name, category, chains, tvl_usd, change_7d, mcap_usd, listed_at, gecko_id,
-symbol`. There is exactly one change window (seven days), one age field, and market
-caps for the traded protocols. There is no TVL history series and no earlier edition
-of the snapshot, so a genuine walk-forward — fit on the past, grade on the future —
-is impossible from this record, and nothing here is labelled one. What the record
-does support is a hold-out test, a jackknife, a seven-day look-back, and cross-view
-consistency checks. Those are what radar-4 runs.
+## Limits, stated plainly
 
-**Hold-out test.** The 128 traded protocols with a recorded cap and a TVL are split
-into two folds by an FNV-1a hash of the slug (59 / 69). The whole pricing pipeline —
-category multiples, shrinkage, band, and each protocol's own growth, maturity and
-reach factors — is fitted on one fold and predicts the other fold's recorded market
-caps; then the folds swap and the results pool:
-
-| | Median miss (factor) | Within 2× | Within 3× | Rank correlation |
-| --- | --- | --- | --- | --- |
-| Full pipeline | 4.99 | 18.0% | 30.5% | 0.37 |
-| Naive anchor (TVL × global median) | 4.94 | 19.5% | — | 0.42 |
-
-Fold by fold, the pipeline's median miss is 5.59 (fold 0, fitted on 69, tested on 59)
-and 4.00 (fold 1, fitted on 59, tested on 69). The honest reading: on individual
-traded protocols the category structure does **not** beat the global anchor. A
-recorded cap carries an idiosyncratic market rating — the record's own ratios run
-from ×0.0003 to ×400 around a median of ×0.22 — that no TVL-based model can foresee,
-and the hold-out measures exactly that dispersion. The board therefore claims the
-*typical* peer price for a category, not a forecast of any protocol's rating, and
-each row's confidence grade carries how much evidence stands behind its price. The
-test's job is to keep that claim calibrated and printed, not to decorate it.
-
-**Jackknife.** Every category with at least three traded peers is refitted without
-its largest peer: across the 14 qualifying categories the multiple moves by a median
-of 35.2%. Thin categories genuinely lean on their largest peer — which is why the
-model shrinks them toward the global median and why the dossier marks their rows'
-confidence down. The number is printed rather than smoothed over.
-
-**Seven-day look-back.** For each board row carrying a seven-day change (211 of
-213), last week's TVL is reconstructed as `tvl / (1 + change_7d / 100)`, the row is
-re-priced with peer multiples held at the fetch's, the growth factor neutral (the
-prior week's change is not in the record) and maturity aged seven days, and the
-board is re-ranked. The look-back order correlates **0.96** (Spearman) with today's,
-and **9 of the top 10** were already there. The ranking is not one day's artefact.
-
-**Cross-view checks.** Against a raw-TVL ranking the board correlates 0.89 with 7
-of the top 10 shared — the model is not a size sort. Against the same model with
-the growth factor removed it correlates 0.998 with the top 10 unchanged — the one
-noisy field in the record tilts the board; it does not drive it.
-
-## Deposit-sized farm plans (radar-4)
-
-radar-3 sized every farm position from flat TVL tiers ($50–$250). radar-4 sizes each
-plan by its protocol's own depth: the deposit is **0.05% of the protocol's TVL**,
-kept between **$500** and **$10,000** and rounded to the nearest $50. Every detail
-page shows the sizing — deposit, share of TVL, and the exposure (the deposit priced
-at the row's own implied multiple) — and the plan's hold step repeats the math. On
-this board the deposits run $2,500–$10,000 (the $500 floor never binds: the
-snapshot's own inclusion floor is $5M of TVL) and the shares run 0.0004%–0.0504%
-of TVL. The share is the honest figure: the same $10,000 is a sliver of Steakhouse
-Financial's $2.75B and a twentieth of a percent of a $20M protocol, and no plan
-recommends a position its protocol's depth makes absurd.
+- 128 peers is a small record, and category levels rest on as few as one peer (14 board
+  rows sit in categories with no traded peer at all and are priced at the market level;
+  their dossiers say so). The jackknife and the fold spread are the honest measure of
+  how much to trust a level.
+- The slope is fitted on traded protocols and extrapolated to pre-token ones; a row more
+  than a decade from the reference size is priced mostly by that extrapolation, and its
+  dossier flags it.
+- A median miss of x3.70 means the typical price is still off by nearly fourfold in one
+  direction or the other. The model orders the board far better than it prices any
+  single launch, and the dashboard's method view says so.
